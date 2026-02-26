@@ -402,7 +402,7 @@ const ELEVATION_URL = 'https://api.open-meteo.com/v1/elevation'
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
 const elevationCache = new Map()
 const slopeCache = new Map()
-const WHEELCHAIR_BLOCKED_HIGHWAYS = ['motorway','motorway_link','trunk','trunk_link','primary','primary_link']
+
 
 let mapInstance = null
 let markers = []
@@ -591,15 +591,6 @@ const calculateDistance = (lat1, lon1, lat2, lon2) => {
   const dLon = (lon2-lon1)*Math.PI/180
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2
   return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-}
-
-const pointToLineDistance = (pLat, pLon, aLat, aLon, bLat, bLon) => {
-  const dx = bLon-aLon, dy = bLat-aLat
-  const lenSq = dx*dx+dy*dy
-  if (lenSq === 0) return calculateDistance(pLat,pLon,aLat,aLon)
-  let t = ((pLon-aLon)*dx+(pLat-aLat)*dy)/lenSq
-  t = Math.max(0,Math.min(1,t))
-  return calculateDistance(pLat,pLon,aLat+t*dy,aLon+t*dx)
 }
 
 const showLoading = (show, text = 'Yükleniyor...') => {
@@ -1012,57 +1003,183 @@ const fetchElevationBatch = async (locations) => {
   }
 }
 
-const fetchWheelchairWaypoints = async (startCoords, endCoords) => {
-  const totalDist = calculateDistance(startCoords.lat, startCoords.lon, endCoords.lat, endCoords.lon)
-  const pad = Math.max(0.005, totalDist/111000*0.3)
-  const minLat = Math.min(startCoords.lat, endCoords.lat)-pad
-  const maxLat = Math.max(startCoords.lat, endCoords.lat)+pad
-  const minLon = Math.min(startCoords.lon, endCoords.lon)-pad
-  const maxLon = Math.max(startCoords.lon, endCoords.lon)+pad
-  const query = `[out:json][timeout:15];(way["highway"~"^(footway|pedestrian|path|living_street)$"]["wheelchair"!="no"](${minLat},${minLon},${maxLat},${maxLon});way["footway"~"^(sidewalk|crossing)$"](${minLat},${minLon},${maxLat},${maxLon});way["sidewalk"~"^(yes|both|left|right)$"](${minLat},${minLon},${maxLat},${maxLon});way["highway"="residential"]["wheelchair"!="no"](${minLat},${minLon},${maxLat},${maxLon});way["highway"]["wheelchair"~"^(yes|designated)$"](${minLat},${minLon},${maxLat},${maxLon}););out geom;`
+const fetchBestWheelchairRoute = async (startCoords, endCoords) => {
+  const valhallaResult = await fetchValhallaWheelchairRoute(startCoords, endCoords)
+  if (valhallaResult) return valhallaResult
+  return await fetchOSRMFlatRoute(startCoords, endCoords)
+}
+
+const fetchValhallaWheelchairRoute = async (startCoords, endCoords) => {
+  const VALHALLA_URL = 'https://valhalla1.openstreetmap.de/route'
+  const body = {
+    locations: [
+      { lon: startCoords.lon, lat: startCoords.lat, type: 'break' },
+      { lon: endCoords.lon, lat: endCoords.lat, type: 'break' }
+    ],
+    costing: 'pedestrian',
+    costing_options: {
+      pedestrian: {
+        use_hills: 0.0,
+        max_grade: 8,
+        step_penalty: 30,
+        use_sidewalks: 1.0,
+        use_living_streets: 0.8
+      }
+    },
+    directions_options: { language: 'tr', units: 'km' }
+  }
   try {
-    const resp = await fetch(OVERPASS_URL, {
+    const controller = new AbortController()
+    const tid = setTimeout(() => controller.abort(), 12000)
+    const resp = await fetch(VALHALLA_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(query)}`
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal
     })
-    if (!resp.ok) return []
+    clearTimeout(tid)
+    if (!resp.ok) return null
     const data = await resp.json()
-    if (!data.elements || data.elements.length === 0) return []
-    const candidates = []
-    for (const el of data.elements) {
-      if (!el.geometry || el.geometry.length === 0) continue
-      const hw = (el.tags && el.tags.highway) || ''
-      if (WHEELCHAIR_BLOCKED_HIGHWAYS.includes(hw)) continue
-      for (const pt of el.geometry) {
-        const distToLine = pointToLineDistance(pt.lat, pt.lon, startCoords.lat, startCoords.lon, endCoords.lat, endCoords.lon)
-        const distFromStart = calculateDistance(startCoords.lat, startCoords.lon, pt.lat, pt.lon)
-        const distFromEnd = calculateDistance(endCoords.lat, endCoords.lon, pt.lat, pt.lon)
-        if (distFromStart < 30 || distFromEnd < 30) continue
-        const threshold = Math.max(80, totalDist*0.08)
-        if (distToLine < threshold) {
-          let score = 0
-          if (el.tags?.wheelchair === 'yes' || el.tags?.wheelchair === 'designated') score += 10
-          if (['footway','pedestrian','path'].includes(hw)) score += 5
-          if (el.tags?.footway === 'sidewalk' || el.tags?.sidewalk) score += 8
-          candidates.push({ lat: pt.lat, lon: pt.lon, distFromStart, distToLine, score })
-        }
+    if (!data.trip || !data.trip.legs || data.trip.legs.length === 0) return null
+    const leg = data.trip.legs[0]
+    const shape = decodePolyline(leg.shape)
+    const coords = shape.map(([lat, lng]) => window.L.latLng(lat, lng))
+    const instructions = (leg.maneuvers || []).map(m => ({
+      text: m.instruction || '',
+      distance: (m.length || 0) * 1000,
+      type: m.type?.toString() || '',
+      direction: m.begin_heading?.toString() || ''
+    }))
+    return {
+      route: {
+        coordinates: coords,
+        summary: {
+          totalDistance: (data.trip.summary.length || 0) * 1000,
+          totalTime: (data.trip.summary.time || 0)
+        },
+        instructions
+      },
+      source: 'valhalla'
+    }
+  } catch (e) {
+    console.warn('Valhalla wheelchair route failed:', e)
+    return null
+  }
+}
+
+const decodePolyline = (encoded, precision = 6) => {
+  const factor = Math.pow(10, precision)
+  const result = []
+  let index = 0, lat = 0, lng = 0
+  while (index < encoded.length) {
+    let shift = 0, result_ = 0, b
+    do { b = encoded.charCodeAt(index++) - 63; result_ |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    const dlat = (result_ & 1) ? ~(result_ >> 1) : (result_ >> 1)
+    lat += dlat
+    shift = 0; result_ = 0
+    do { b = encoded.charCodeAt(index++) - 63; result_ |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    const dlng = (result_ & 1) ? ~(result_ >> 1) : (result_ >> 1)
+    lng += dlng
+    result.push([lat / factor, lng / factor])
+  }
+  return result
+}
+
+const fetchOSRMFlatRoute = async (startCoords, endCoords) => {
+  const OSRM_BASE = 'https://router.project-osrm.org/route/v1/foot'
+  const candidateRoutes = []
+  const fetchRoute = async (waypoints) => {
+    const coord = waypoints.map(w => `${w.lon},${w.lat}`).join(';')
+    const url = `${OSRM_BASE}/${coord}?overview=full&steps=true&geometries=geojson`
+    try {
+      const controller = new AbortController()
+      const tid = setTimeout(() => controller.abort(), 10000)
+      const resp = await fetch(url, { signal: controller.signal })
+      clearTimeout(tid)
+      if (!resp.ok) return null
+      const data = await resp.json()
+      return data.routes?.[0] || null
+    } catch (e) {
+      return null
+    }
+  }
+  const directRoute = await fetchRoute([startCoords, endCoords])
+  if (directRoute) candidateRoutes.push(directRoute)
+  const midLat = (startCoords.lat + endCoords.lat) / 2
+  const midLon = (startCoords.lon + endCoords.lon) / 2
+  const distDeg = Math.sqrt(Math.pow(endCoords.lat - startCoords.lat, 2) + Math.pow(endCoords.lon - startCoords.lon, 2))
+  const offsets = [
+    { lat: midLat + distDeg * 0.15, lon: midLon - distDeg * 0.15 },
+    { lat: midLat - distDeg * 0.15, lon: midLon + distDeg * 0.15 },
+    { lat: midLat + distDeg * 0.1, lon: midLon + distDeg * 0.1 },
+    { lat: midLat - distDeg * 0.1, lon: midLon - distDeg * 0.1 }
+  ]
+  const altResults = await Promise.all(
+    offsets.map(via => fetchRoute([startCoords, via, endCoords]))
+  )
+  altResults.forEach(r => { if (r) candidateRoutes.push(r) })
+  if (candidateRoutes.length === 0) return null
+  if (candidateRoutes.length === 1) {
+    return { route: osrmRouteToLeafletFormat(candidateRoutes[0]), source: 'osrm' }
+  }
+  showLoading(true, 'En az eğimli rota seçiliyor...')
+  const maxDirect = directRoute ? directRoute.distance * 1.4 : Infinity
+  const validCandidates = candidateRoutes.filter(r => r.distance <= maxDirect)
+  const scored = await Promise.all(validCandidates.map(async (route) => {
+    const score = await scoreSlopeForRoute(route.geometry.coordinates)
+    return { route, score }
+  }))
+  scored.sort((a, b) => a.score - b.score)
+  return { route: osrmRouteToLeafletFormat(scored[0].route), source: 'osrm' }
+}
+
+const scoreSlopeForRoute = async (coordinates) => {
+  if (!coordinates || coordinates.length < 2) return 999
+  const step = Math.max(1, Math.floor(coordinates.length / 10))
+  const sampled = []
+  for (let i = 0; i < coordinates.length; i += step) sampled.push(coordinates[i])
+  const last = coordinates[coordinates.length - 1]
+  if (sampled[sampled.length - 1] !== last) sampled.push(last)
+  const points = sampled.map(c => ({ latitude: c[1], longitude: c[0] }))
+  try {
+    const elevs = await fetchElevationBatch(points)
+    if (!elevs || elevs.length < 2) return 999
+    let totalSlope = 0
+    let count = 0
+    for (let i = 1; i < sampled.length && i < elevs.length; i++) {
+      const e0 = elevs[i - 1], e1 = elevs[i]
+      if (typeof e0 !== 'number' || typeof e1 !== 'number') continue
+      const dist = calculateDistance(sampled[i-1][1], sampled[i-1][0], sampled[i][1], sampled[i][0])
+      if (dist > 5) { totalSlope += Math.abs(((e1 - e0) / dist) * 100); count++ }
+    }
+    return count > 0 ? totalSlope / count : 999
+  } catch (e) {
+    return 999
+  }
+}
+
+const osrmRouteToLeafletFormat = (osrmRoute) => {
+  const coords = osrmRoute.geometry.coordinates.map(c => window.L.latLng(c[1], c[0]))
+  const instructions = []
+  if (osrmRoute.legs) {
+    for (const leg of osrmRoute.legs) {
+      for (const step of (leg.steps || [])) {
+        instructions.push({
+          text: step.maneuver?.instruction || step.name || '',
+          distance: step.distance || 0,
+          type: step.maneuver?.type || '',
+          direction: step.maneuver?.modifier || ''
+        })
       }
     }
-    if (candidates.length === 0) return []
-    candidates.sort((a,b) => a.distFromStart-b.distFromStart)
-    const deduped = [candidates[0]]
-    for (let i = 1; i < candidates.length; i++) {
-      const prev = deduped[deduped.length-1]
-      if (calculateDistance(prev.lat, prev.lon, candidates[i].lat, candidates[i].lon) > 60) deduped.push(candidates[i])
-    }
-    const step = Math.max(1, Math.floor(deduped.length/8))
-    const result = []
-    for (let i = 0; i < deduped.length && result.length < 8; i += step) result.push(deduped[i])
-    return result
-  } catch (e) {
-    console.warn(e)
-    return []
+  }
+  return {
+    coordinates: coords,
+    summary: {
+      totalDistance: osrmRoute.distance,
+      totalTime: osrmRoute.duration
+    },
+    instructions
   }
 }
 
@@ -1100,16 +1217,63 @@ const calculateRoute = async () => {
       return
     }
     clearRoute()
-    let intermediateWaypoints = []
+
     if (isWheelchair) {
-      showLoading(true, 'Kaldırımlar ve erişilebilir yollar aranıyor...')
-      const wpPromise = fetchWheelchairWaypoints(startCoords, endCoords)
-      const timeout = new Promise(res => setTimeout(() => res([]), 6000))
-      intermediateWaypoints = await Promise.race([wpPromise, timeout])
+      showLoading(true, 'En az eğimli erişilebilir rota hesaplanıyor...')
+      try {
+        const bestRouteResult = await fetchBestWheelchairRoute(startCoords, endCoords)
+        if (bestRouteResult) {
+          const r = bestRouteResult.route
+          const dist = (r.summary.totalDistance / 1000).toFixed(2)
+          const dur = Math.round(r.summary.totalTime / 60)
+          routeDistance.value = dist + ' km'
+          routeDuration.value = dur + ' dk'
+          routeCoordinates = r.coordinates
+          routeSteps = r.instructions
+          routeInfoVisible.value = true
+          emptyState.value = false
+          const startMarker = L.marker([startCoords.lat, startCoords.lon], {
+            icon: L.divIcon({
+              html: `<div style="width:32px;height:32px;background:#22c55e;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;color:white;font-size:13px;">A</div>`,
+              iconSize: [32, 32], className: ''
+            })
+          }).addTo(mapInstance)
+          const endMarker = L.marker([endCoords.lat, endCoords.lon], {
+            icon: L.divIcon({
+              html: `<div style="width:32px;height:32px;background:#ef4444;border:3px solid #fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;color:white;font-size:13px;">B</div>`,
+              iconSize: [32, 32], className: ''
+            })
+          }).addTo(mapInstance)
+          routePolylines.push(startMarker, endMarker)
+          const bounds = L.latLngBounds(routeCoordinates)
+          mapInstance.fitBounds(bounds, { padding: [40, 40] })
+          await drawSlopeBasedRoute(r, true)
+          showLoading(false)
+          menuOpen.value = true
+          accessibility.announceRoute(dist, dur, true, lastMaxSlope)
+          const startLabel = routeStart.value.includes(',') ? 'Mevcut Konum' : routeStart.value.split(',')[0].trim()
+          const endLabel = routeEnd.value.split(',')[0].trim()
+          saveHistory({
+            id: Date.now(),
+            startRaw: routeStart.value,
+            endRaw: routeEnd.value,
+            startLabel: startLabel.length > 30 ? startLabel.slice(0, 30) + '…' : startLabel,
+            endLabel: endLabel.length > 30 ? endLabel.slice(0, 30) + '…' : endLabel,
+            distance: dist + ' km',
+            duration: dur + ' dk',
+            wheelchair: true,
+            ts: Date.now(),
+            dateStr: formatHistoryDate(Date.now())
+          })
+          return
+        }
+      } catch (e) {
+        console.warn('Wheelchair route error, falling back to standard:', e)
+      }
     }
+
     const allWaypoints = [
       L.latLng(startCoords.lat, startCoords.lon),
-      ...intermediateWaypoints.map(wp => L.latLng(wp.lat, wp.lon)),
       L.latLng(endCoords.lat, endCoords.lon)
     ]
     showLoading(true, 'Rota hesaplanıyor...')
@@ -1139,8 +1303,6 @@ const calculateRoute = async () => {
         const dur = Math.round(r.summary.totalTime/60)
         routeDistance.value = dist + ' km'
         routeDuration.value = dur + ' dk'
-
-
         routeCoordinates = r.coordinates
         routeSteps = (r.instructions || []).map(step => ({
           text: step.text || '',
@@ -1188,15 +1350,16 @@ const calculateRoute = async () => {
 }
 
 const drawSlopeBasedRoute = async (r, isWheelchair) => {
-  routePolylines.forEach(p => mapInstance.removeLayer(p))
+  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch(_e) { /* ignore */ } })
   routePolylines = []
   const L = window.L
   const coordinates = r.coordinates
+  const coordsAsLatLng = coordinates.map(c => [c.lat, c.lng])
   const segmentSize = Math.max(2, Math.floor(coordinates.length/20))
   const segments = []
   for (let i = 0; i < coordinates.length-segmentSize; i += segmentSize) {
     segments.push({
-      coords: coordinates.slice(i, Math.min(i+segmentSize+1, coordinates.length)),
+      coords: coordsAsLatLng.slice(i, Math.min(i+segmentSize+1, coordinates.length)),
       start: coordinates[i],
       end: coordinates[Math.min(i+segmentSize, coordinates.length-1)]
     })
@@ -1237,7 +1400,7 @@ const drawSlopeBasedRoute = async (r, isWheelchair) => {
     const lineColor = (isWheelchair && isSteep) ? '#f97316' : color
     const dashArray = (isWheelchair && isSteep) ? '10, 6' : null
     const opacity = (isWheelchair && isSteep) ? 0.7 : 1.0
-    const polyline = L.polyline(seg.coords.map(c => [c.lat, c.lng]), {
+    const polyline = L.polyline(seg.coords, {
       color: lineColor, weight: 7, opacity, smoothFactor: 1, dashArray, pane: 'routePane'
     }).addTo(mapInstance)
     const slopeText = valid ? `Eğim: ${slopeVal.toFixed(1)}%` : 'Eğim verisi yok'
@@ -1283,7 +1446,7 @@ const clearMarkers = () => {
 
 const clearRoute = () => {
   if (routeControl) { mapInstance.removeControl(routeControl); routeControl = null }
-  routePolylines.forEach(p => mapInstance.removeLayer(p))
+  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch(_e) { /* ignore */ } })
   routePolylines = []
 }
 
