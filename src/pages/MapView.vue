@@ -19,6 +19,25 @@
         </div>
       </div>
 
+      <transition name="wind-banner">
+        <div
+          v-if="windWarning && windWarning.level !== 'calm'"
+          class="sidebar-wind-banner"
+          :class="[`wind-level-${windWarning.level}`, theme]"
+        >
+          <div class="swb-left">
+            <span class="swb-emoji">{{ windWarning.emoji }}</span>
+            <div class="swb-texts">
+              <span class="swb-title" :style="{ color: windWarning.color }">{{ windWarning.text }}</span>
+              <span class="swb-msg">{{ windWarning.message }}</span>
+            </div>
+          </div>
+          <button class="swb-close" @click="dismissWindWarning" aria-label="Rüzgar uyarısını kapat">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </transition>
+
       <div class="mode-tabs">
         <button class="mode-tab" :class="{ active: currentMode === 'search' }" @click="switchMode('search')">
           <i class="fa-solid fa-magnifying-glass"></i>
@@ -148,7 +167,7 @@
               Tekerlekli sandalye dostu yollar seçildi
             </div>
 
-            <div v-if="windWarning" class="route-wind-row" :style="{ borderColor: windWarning.color + '55', background: windWarning.color + '12' }">
+            <div v-if="windWarning && windWarning.level !== 'calm'" class="route-wind-row" :style="{ borderColor: windWarning.color + '55', background: windWarning.color + '12' }">
               <span class="route-wind-emoji">{{ windWarning.emoji }}</span>
               <div class="route-wind-texts">
                 <span class="route-wind-title" :style="{ color: windWarning.color }">{{ windWarning.text }}</span>
@@ -342,27 +361,6 @@
       <div class="loading-text">{{ loadingText }}</div>
     </div>
 
-    <transition name="wind-slide">
-      <div
-        v-if="windWarning && windWarning.level !== 'calm'"
-        class="wind-warning-banner"
-        :class="[`wind-${windWarning.level}`, theme]"
-        role="alert"
-        aria-live="assertive"
-      >
-        <div class="wind-warning-left">
-          <span class="wind-emoji">{{ windWarning.emoji }}</span>
-          <div class="wind-warning-texts">
-            <span class="wind-warning-title">{{ windWarning.text }}</span>
-            <span class="wind-warning-msg">{{ windWarning.message }}</span>
-          </div>
-        </div>
-        <button class="wind-close-btn" @click="dismissWindWarning" aria-label="Uyarıyı kapat">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
-      </div>
-    </transition>
-
     <AccessibilitySettings
       :open="accessibility.settingsOpen.value"
       :settings="accessibility.settings"
@@ -435,14 +433,11 @@ let navInterval = null
 
 let routeCoordinates = []
 
-
-
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search'
 const ELEVATION_URL = 'https://api.open-meteo.com/v1/elevation'
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
 const elevationCache = new Map()
 const slopeCache = new Map()
-
 
 let mapInstance = null
 let markers = []
@@ -450,7 +445,6 @@ let routeControl = null
 let routePolylines = []
 let tempMarkers = { start: null, end: null }
 let userMarker = null
-
 
 const classifyWind = (windSpeed, windGusts) => {
   const effective = Math.max(windSpeed ?? 0, (windGusts ?? 0) * 0.7)
@@ -1482,7 +1476,7 @@ const calculateRoute = async () => {
 }
 
 const drawSlopeBasedRoute = async (r, isWheelchair) => {
-  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch(_e) { /* ignore */ } })
+  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch (_e) { /* ignore */ } })
   routePolylines = []
   const L = window.L
   const coordinates = r.coordinates
@@ -1578,7 +1572,7 @@ const clearMarkers = () => {
 
 const clearRoute = () => {
   if (routeControl) { mapInstance.removeControl(routeControl); routeControl = null }
-  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch(_e) { /* ignore */ } })
+  routePolylines.forEach(p => { try { mapInstance.removeLayer(p) } catch (_e) { /* ignore */ } })
   routePolylines = []
 }
 
@@ -1754,7 +1748,6 @@ const getTurnIcon = (type, direction) => {
 
 const onNavPositionUpdate = (pos) => {
   const { latitude, longitude } = pos.coords
-
 
   if (userMarker) mapInstance.removeLayer(userMarker)
   userMarker = window.L.marker([latitude, longitude], {
@@ -2048,7 +2041,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 .logo-icon {
   width: 38px;
@@ -2068,6 +2061,52 @@ onUnmounted(() => {
   color: var(--text);
   letter-spacing: -0.3px;
 }
+
+.sidebar-wind-banner {
+  margin: 0 20px 12px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1.5px solid;
+  flex-shrink: 0;
+}
+.sidebar-wind-banner.light { background: rgba(255,255,255,0.8); }
+.sidebar-wind-banner.dark  { background: rgba(20,28,22,0.9); }
+
+.wind-level-moderate { border-color: #eab30888; }
+.wind-level-strong   { border-color: #f9731688; }
+.wind-level-very_strong {
+  border-color: #ef444488;
+  animation: bannerPulse 1.8s ease-in-out infinite;
+}
+@keyframes bannerPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.0); }
+  50%       { box-shadow: 0 0 0 3px rgba(239,68,68,0.2); }
+}
+
+.swb-left  { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; }
+.swb-emoji { font-size: 18px; line-height: 1.3; flex-shrink: 0; }
+.swb-texts { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.swb-title { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }
+.swb-msg   { font-size: 11px; color: var(--text-secondary); line-height: 1.45; }
+.swb-close {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: rgba(0,0,0,0.06);
+  border: none; cursor: pointer;
+  color: var(--text-secondary); font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; margin-top: 1px;
+  transition: background 0.15s;
+  font-family: inherit;
+}
+.swb-close:hover { background: rgba(239,68,68,0.12); color: #ef4444; }
+
+.wind-banner-enter-active { transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1); }
+.wind-banner-leave-active { transition: all 0.2s ease-in; }
+.wind-banner-enter-from  { opacity: 0; transform: translateY(-8px) scaleY(0.9); }
+.wind-banner-leave-to    { opacity: 0; transform: translateY(-4px) scaleY(0.95); }
 
 .mode-tabs {
   display: flex;
@@ -2743,108 +2782,6 @@ onUnmounted(() => {
 .route-wind-title { font-size: 12px; font-weight: 800; }
 .route-wind-msg { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
 
-.wind-warning-banner {
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9000;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  max-width: 480px;
-  width: calc(100vw - 32px);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.22);
-  border: 1.5px solid rgba(255,255,255,0.12);
-  pointer-events: all;
-}
-
-.wind-warning-banner.light {
-  background: rgba(255,255,255,0.92);
-  color: #1a1a1a;
-  border-color: rgba(0,0,0,0.08);
-}
-.wind-warning-banner.dark {
-  background: rgba(28,32,36,0.95);
-  color: #f0f0f0;
-  border-color: rgba(255,255,255,0.1);
-}
-
-.wind-moderate { border-left: 4px solid #eab308 !important; }
-.wind-strong   { border-left: 4px solid #f97316 !important; }
-.wind-very_strong { border-left: 4px solid #ef4444 !important; animation: wind-pulse 1.4s ease-in-out infinite; }
-
-@keyframes wind-pulse {
-  0%, 100% { box-shadow: 0 8px 32px rgba(239,68,68,0.2); }
-  50%       { box-shadow: 0 8px 40px rgba(239,68,68,0.5); }
-}
-
-.wind-warning-left {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-}
-
-.wind-emoji {
-  font-size: 28px;
-  line-height: 1;
-  flex-shrink: 0;
-}
-
-.wind-warning-texts {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.wind-warning-title {
-  font-size: 13px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-}
-
-.wind-warning-msg {
-  font-size: 12px;
-  line-height: 1.5;
-  opacity: 0.85;
-  word-break: break-word;
-}
-
-.wind-close-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: inherit;
-  opacity: 0.5;
-  font-size: 16px;
-  padding: 2px 4px;
-  flex-shrink: 0;
-  transition: opacity 0.18s;
-}
-.wind-close-btn:hover { opacity: 1; }
-
-.wind-slide-enter-active { transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1); }
-.wind-slide-leave-active { transition: all 0.25s ease-in; }
-.wind-slide-enter-from   { opacity: 0; transform: translateX(-50%) translateY(24px) scale(0.95); }
-.wind-slide-leave-to     { opacity: 0; transform: translateX(-50%) translateY(24px) scale(0.95); }
-
-@media (max-width: 768px) {
-  .wind-warning-banner { bottom: 80px; }
-}
-
-@media (orientation: landscape) and (max-height: 500px) {
-  .nav-arrow-panel { padding: 8px 16px; }
-  .nav-arrow-icon { width: 48px; height: 48px; font-size: 20px; border-radius: 12px; }
-  .nav-step-dist { font-size: 18px; }
-  .nav-top-bar { padding: 6px 12px; }
-}
-
 .history-panel { display: flex; flex-direction: column; gap: 12px; }
 
 .history-header-row {
@@ -2969,5 +2906,4 @@ onUnmounted(() => {
   margin-left: auto;
 }
 .history-arrow { color: var(--text-secondary); font-size: 11px; flex-shrink: 0; }
-
 </style>
