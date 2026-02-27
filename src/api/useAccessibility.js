@@ -14,7 +14,8 @@ const defaultSettings = () => ({
   speechVolume: 1.0,
   announceRoute: true,
   announceSlope: true,
-  navigationVoice: true
+  navigationVoice: true,
+  announceWeather: true
 })
 
 function getStorageKey(ipHash) {
@@ -77,7 +78,8 @@ function saveToStorage(key, settings) {
       speechVolume: Math.min(1, Math.max(0, Number(settings.speechVolume) || 1)),
       announceRoute: Boolean(settings.announceRoute),
       announceSlope: Boolean(settings.announceSlope),
-      navigationVoice: Boolean(settings.navigationVoice)
+      navigationVoice: Boolean(settings.navigationVoice),
+      announceWeather: Boolean(settings.announceWeather)
     }
     localStorage.setItem(key, JSON.stringify(sanitized))
   } catch (e) {
@@ -271,6 +273,19 @@ export function useAccessibility() {
     speakNavigation('Hedefinize ulaştınız. Navigasyon tamamlandı.')
   }
 
+  const announceWindWarning = (windWarning) => {
+    if (!settings.announceWeather) return
+    if (!windWarning || windWarning.level === 'calm') return
+    if (!settings.voiceEnabled && !settings.navigationVoice) return
+    const msg = windWarning.message
+    if (!msg) return
+    if (settings.visuallyImpaired && settings.voiceEnabled) {
+      speak(msg, { interrupt: false })
+    } else if (settings.navigationVoice) {
+      speakNavigation(msg, { interrupt: false })
+    }
+  }
+
   return {
     settings,
     ready,
@@ -288,6 +303,7 @@ export function useAccessibility() {
     announceLoading,
     announceSlopeWarning,
     announceNavigationStep,
-    announceArrival
+    announceArrival,
+    announceWindWarning
   }
 }
