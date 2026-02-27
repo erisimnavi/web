@@ -148,6 +148,14 @@
               Tekerlekli sandalye dostu yollar seçildi
             </div>
 
+            <div v-if="windWarning" class="route-wind-row" :style="{ borderColor: windWarning.color + '55', background: windWarning.color + '12' }">
+              <span class="route-wind-emoji">{{ windWarning.emoji }}</span>
+              <div class="route-wind-texts">
+                <span class="route-wind-title" :style="{ color: windWarning.color }">{{ windWarning.text }}</span>
+                <span class="route-wind-msg">{{ windWarning.message }}</span>
+              </div>
+            </div>
+
             <div class="slope-legend">
               <div class="legend-header">Eğim Renk Göstergesi</div>
               <div class="legend-items">
@@ -319,6 +327,10 @@
           <i class="fa-solid fa-road"></i>
           <span>Eğim: {{ currentSlopeText }}</span>
         </div>
+        <div v-if="navWindText" class="nav-wind-indicator" :style="{ color: navWindColor }">
+          <span class="nav-wind-icon-txt">{{ navWindEmoji }}</span>
+          <span>{{ navWindText }}</span>
+        </div>
         <div v-if="wheelchairMode" class="nav-wc-badge">
           <i class="fa-solid fa-wheelchair"></i>
         </div>
@@ -329,6 +341,27 @@
       <div class="spinner"></div>
       <div class="loading-text">{{ loadingText }}</div>
     </div>
+
+    <transition name="wind-slide">
+      <div
+        v-if="windWarning && windWarning.level !== 'calm'"
+        class="wind-warning-banner"
+        :class="[`wind-${windWarning.level}`, theme]"
+        role="alert"
+        aria-live="assertive"
+      >
+        <div class="wind-warning-left">
+          <span class="wind-emoji">{{ windWarning.emoji }}</span>
+          <div class="wind-warning-texts">
+            <span class="wind-warning-title">{{ windWarning.text }}</span>
+            <span class="wind-warning-msg">{{ windWarning.message }}</span>
+          </div>
+        </div>
+        <button class="wind-close-btn" @click="dismissWindWarning" aria-label="Uyarıyı kapat">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    </transition>
 
     <AccessibilitySettings
       :open="accessibility.settingsOpen.value"
@@ -385,8 +418,15 @@ const navRemainingDist = ref('')
 const navRemainingTime = ref('')
 const currentSlopeText = ref('0%')
 const currentSlopeColor = ref('#22c55e')
+const navWindText = ref('')
+const navWindColor = ref('#22c55e')
+const navWindEmoji = ref('')
 
 const accessibility = useAccessibility()
+
+const windWarning = ref(null)
+const windDismissed = ref(false)
+const OPEN_METEO_WEATHER_URL = 'https://api.open-meteo.com/v1/forecast'
 
 let lastMaxSlope = 0
 let routeSteps = []
@@ -411,6 +451,95 @@ let routePolylines = []
 let tempMarkers = { start: null, end: null }
 let userMarker = null
 
+
+const classifyWind = (windSpeed, windGusts) => {
+  const effective = Math.max(windSpeed ?? 0, (windGusts ?? 0) * 0.7)
+  if (effective >= 60) return { level: 'very_strong', safe: false, text: 'Çok Şiddetli Rüzgar', emoji: '🌪️', color: '#ef4444', message: `Rüzgar hızı ${windSpeed} km/s, ani artış ${windGusts} km/s. Tekerlekli sandalye ile dışarı çıkmak çok tehlikeli! Seyahati ertelemeniz önerilir.` }
+  if (effective >= 40) return { level: 'strong', safe: false, text: 'Şiddetli Rüzgar', emoji: '💨', color: '#f97316', message: `Rüzgar hızı ${windSpeed} km/s. Açık alanda güçlük çekebilirsiniz. Korunaklı rotalar tercih edin.` }
+  if (effective >= 20) return { level: 'moderate', safe: true, text: 'Orta Şiddetli Rüzgar', emoji: '🌬️', color: '#eab308', message: `Rüzgar hızı ${windSpeed} km/s. Dikkatli olun, yüksek ve açık alanlarda zorluk yaşayabilirsiniz.` }
+  return { level: 'calm', safe: true, text: 'Sakin', emoji: '✅', color: '#22c55e', message: null }
+}
+
+const fetchWeatherForLocation = async (lat, lon) => {
+  try {
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      current: 'wind_speed_10m,wind_gusts_10m,wind_direction_10m,temperature_2m',
+      wind_speed_unit: 'kmh',
+      forecast_days: 1
+    })
+    const resp = await fetch(`${OPEN_METEO_WEATHER_URL}?${params}`)
+    if (!resp.ok) return
+    const data = await resp.json()
+    const c = data.current
+    const warning = classifyWind(Math.round(c.wind_speed_10m), Math.round(c.wind_gusts_10m))
+    if (warning.level !== 'calm' && !windDismissed.value) {
+      windWarning.value = warning
+      accessibility.announceWindWarning(warning)
+    }
+  } catch (e) {
+    console.warn('Weather fetch error:', e)
+  }
+}
+
+const dismissWindWarning = () => {
+  windWarning.value = null
+  windDismissed.value = true
+}
+
+const announceRouteWeather = async (lat, lon) => {
+  try {
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      current: 'wind_speed_10m,wind_gusts_10m,temperature_2m',
+      wind_speed_unit: 'kmh',
+      forecast_days: 1
+    })
+    const resp = await fetch(`${OPEN_METEO_WEATHER_URL}?${params}`)
+    if (!resp.ok) return
+    const data = await resp.json()
+    const c = data.current
+    const speed = Math.round(c.wind_speed_10m)
+    const gusts = Math.round(c.wind_gusts_10m)
+    const warning = classifyWind(speed, gusts)
+
+    windDismissed.value = false
+    windWarning.value = warning.level !== 'calm' ? warning : null
+
+    navWindEmoji.value = warning.emoji
+    navWindColor.value = warning.color
+    if (warning.level === 'calm') {
+      navWindText.value = `Rüzgar ${speed} km/s`
+    } else {
+      navWindText.value = `${warning.text} ${speed} km/s`
+    }
+
+    let msg = ''
+    if (warning.level === 'calm') {
+      msg = `Rota üzerinde rüzgar sakin, ${speed} kilometre saat.`
+    } else if (warning.level === 'moderate') {
+      msg = `Dikkat! Rotada orta şiddetli rüzgar var, ${speed} kilometre saat. Açık alanlarda dikkatli olun.`
+    } else if (warning.level === 'strong') {
+      msg = `Uyarı! Rotada şiddetli rüzgar var, ${speed} kilometre saat. Korunaklı yolları tercih edin.`
+    } else {
+      msg = `Tehlike! Rotada çok şiddetli rüzgar var, ${speed} kilometre saat, ani artış ${gusts} kilometre saat. Seyahati ertelemeniz önerilir!`
+    }
+
+    if (accessibility.settings.voiceEnabled || accessibility.settings.navigationVoice) {
+      setTimeout(() => {
+        if (warning.level === 'calm' || warning.level === 'moderate') {
+          accessibility.speakNavigation(msg, { interrupt: false })
+        } else {
+          accessibility.speak(msg, { interrupt: false })
+        }
+      }, 3500)
+    }
+  } catch (e) {
+    console.warn('announceRouteWeather error:', e)
+  }
+}
 
 const goHome = () => {
   router.push('/')
@@ -645,6 +774,7 @@ const requestUserLocation = () => {
       if (!routeStart.value) {
         routeStart.value = `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
       }
+      fetchWeatherForLocation(latitude, longitude)
     },
     () => {}
   )
@@ -1251,6 +1381,7 @@ const calculateRoute = async () => {
           showLoading(false)
           menuOpen.value = true
           accessibility.announceRoute(dist, dur, true, lastMaxSlope)
+          announceRouteWeather(startCoords.lat, startCoords.lon)
           const startLabel = routeStart.value.includes(',') ? 'Mevcut Konum' : routeStart.value.split(',')[0].trim()
           const endLabel = routeEnd.value.split(',')[0].trim()
           saveHistory({
@@ -1316,6 +1447,7 @@ const calculateRoute = async () => {
         showLoading(false)
         menuOpen.value = true
         accessibility.announceRoute(dist, dur, isWheelchair, lastMaxSlope)
+        announceRouteWeather(startCoords.lat, startCoords.lon)
         const startLabel = routeStart.value.includes(',') ? 'Mevcut Konum' : routeStart.value.split(',')[0].trim()
         const endLabel = routeEnd.value.split(',')[0].trim()
         saveHistory({
@@ -2575,6 +2707,135 @@ onUnmounted(() => {
   .menu-toggle-fixed, .mode-tab, .btn-primary, .btn-nav-start, .pick-btn, .footer-btn, .result-item, .a11y-fab { -webkit-tap-highlight-color: transparent; }
   .result-item:active { background: var(--accent-light); border-color: var(--accent); }
   .btn-nav-start:active { transform: scale(0.97); }
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .nav-arrow-panel { padding: 8px 16px; }
+  .nav-arrow-icon { width: 48px; height: 48px; font-size: 20px; border-radius: 12px; }
+  .nav-step-dist { font-size: 18px; }
+  .nav-top-bar { padding: 6px 12px; }
+}
+
+.nav-wind-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(255,255,255,0.08);
+  padding: 6px 11px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+.nav-wind-icon-txt { font-size: 15px; line-height: 1; }
+
+.route-wind-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1.5px solid;
+  margin-top: 8px;
+}
+.route-wind-emoji { font-size: 22px; flex-shrink: 0; line-height: 1.2; }
+.route-wind-texts { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.route-wind-title { font-size: 12px; font-weight: 800; }
+.route-wind-msg { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+
+.wind-warning-banner {
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  max-width: 480px;
+  width: calc(100vw - 32px);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.22);
+  border: 1.5px solid rgba(255,255,255,0.12);
+  pointer-events: all;
+}
+
+.wind-warning-banner.light {
+  background: rgba(255,255,255,0.92);
+  color: #1a1a1a;
+  border-color: rgba(0,0,0,0.08);
+}
+.wind-warning-banner.dark {
+  background: rgba(28,32,36,0.95);
+  color: #f0f0f0;
+  border-color: rgba(255,255,255,0.1);
+}
+
+.wind-moderate { border-left: 4px solid #eab308 !important; }
+.wind-strong   { border-left: 4px solid #f97316 !important; }
+.wind-very_strong { border-left: 4px solid #ef4444 !important; animation: wind-pulse 1.4s ease-in-out infinite; }
+
+@keyframes wind-pulse {
+  0%, 100% { box-shadow: 0 8px 32px rgba(239,68,68,0.2); }
+  50%       { box-shadow: 0 8px 40px rgba(239,68,68,0.5); }
+}
+
+.wind-warning-left {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.wind-emoji {
+  font-size: 28px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.wind-warning-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.wind-warning-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.wind-warning-msg {
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.85;
+  word-break: break-word;
+}
+
+.wind-close-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.5;
+  font-size: 16px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+  transition: opacity 0.18s;
+}
+.wind-close-btn:hover { opacity: 1; }
+
+.wind-slide-enter-active { transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1); }
+.wind-slide-leave-active { transition: all 0.25s ease-in; }
+.wind-slide-enter-from   { opacity: 0; transform: translateX(-50%) translateY(24px) scale(0.95); }
+.wind-slide-leave-to     { opacity: 0; transform: translateX(-50%) translateY(24px) scale(0.95); }
+
+@media (max-width: 768px) {
+  .wind-warning-banner { bottom: 80px; }
 }
 
 @media (orientation: landscape) and (max-height: 500px) {
