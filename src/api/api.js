@@ -1,10 +1,99 @@
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search'
 const ELEVATION_URL = 'https://api.open-elevation.com/api/v1/lookup'
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
+const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
 
 const elevationCache = new Map()
 const slopeCache = new Map()
+const weatherCache = new Map()
 const WHEELCHAIR_BLOCKED_HIGHWAYS = ['motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link']
+
+export const WIND_THRESHOLDS = {
+  MODERATE: 20,
+  STRONG: 40,
+  VERY_STRONG: 60
+}
+
+export async function fetchWeather(lat, lon) {
+  const cacheKey = `${lat.toFixed(2)},${lon.toFixed(2)}`
+  if (weatherCache.has(cacheKey)) return weatherCache.get(cacheKey)
+  try {
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      current: 'wind_speed_10m,wind_gusts_10m,wind_direction_10m,weather_code,temperature_2m',
+      wind_speed_unit: 'kmh',
+      forecast_days: 1
+    })
+    const resp = await fetch(`${OPEN_METEO_URL}?${params}`)
+    if (!resp.ok) throw new Error(`Open-Meteo hata: ${resp.status}`)
+    const data = await resp.json()
+    const current = data.current
+    const result = {
+      windSpeed: current.wind_speed_10m,
+      windGusts: current.wind_gusts_10m,
+      windDirection: current.wind_direction_10m,
+      weatherCode: current.weather_code,
+      temperature: current.temperature_2m,
+      windWarning: classifyWind(current.wind_speed_10m, current.wind_gusts_10m),
+      fetchedAt: Date.now()
+    }
+    weatherCache.set(cacheKey, result)
+    setTimeout(() => weatherCache.delete(cacheKey), 10 * 60 * 1000)
+    return result
+  } catch (e) {
+    console.warn('fetchWeather hata:', e)
+    return null
+  }
+}
+
+export function classifyWind(windSpeed, windGusts) {
+  const effective = Math.max(windSpeed ?? 0, (windGusts ?? 0) * 0.7)
+  if (effective >= WIND_THRESHOLDS.VERY_STRONG) {
+    return {
+      level: 'very_strong',
+      safe: false,
+      text: 'Çok Şiddetli Rüzgar',
+      emoji: '🌪️',
+      color: '#ef4444',
+      message: `Rüzgar hızı ${windSpeed} km/s, gusts ${windGusts} km/s. Tekerlekli sandalye ile dışarı çıkmak çok tehlikeli! Seyahati ertelemeniz önerilir. UÇABİLİRSİNİZ!!!`
+    }
+  }
+  if (effective >= WIND_THRESHOLDS.STRONG) {
+    return {
+      level: 'strong',
+      safe: false,
+      text: 'Şiddetli Rüzgar',
+      emoji: '💨',
+      color: '#f97316',
+      message: `Rüzgar hızı ${windSpeed} km/s. Açık alanda güçlük çekebilirsiniz. Korunaklı rotalar tercih edin.`
+    }
+  }
+  if (effective >= WIND_THRESHOLDS.MODERATE) {
+    return {
+      level: 'moderate',
+      safe: true,
+      text: 'Orta Şiddetli Rüzgar',
+      emoji: '🌬️',
+      color: '#eab308',
+      message: `Rüzgar hızı ${windSpeed} km/s. Dikkatli olun, yüksek ve açık alanlarda zorluk yaşayabilirsiniz.`
+    }
+  }
+  return {
+    level: 'calm',
+    safe: true,
+    text: 'Sakin',
+    emoji: '✅',
+    color: '#22c55e',
+    message: null
+  }
+}
+
+export function windDirectionText(degrees) {
+  if (degrees === null || degrees === undefined) return ''
+  const dirs = ['Kuzey', 'Kuzeydoğu', 'Doğu', 'Güneydoğu', 'Güney', 'Güneybatı', 'Batı', 'Kuzeybatı']
+  return dirs[Math.round(degrees / 45) % 8]
+}
 
 export async function searchNominatim(query, limit = 10, lat = null, lon = null) {
   const params = new URLSearchParams({ q: query, format: 'json', limit, addressdetails: 1, extratags: 1 })
@@ -291,4 +380,4 @@ export function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export { slopeCache, elevationCache }
+export { slopeCache, elevationCache, weatherCache }
